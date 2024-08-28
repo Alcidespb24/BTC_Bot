@@ -1,0 +1,1 @@
+print(position.qty)
