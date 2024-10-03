@@ -4,6 +4,27 @@ import logging
 import os
 import asyncio
 from flask_httpauth import HTTPBasicAuth
+
+# In-memory log storage
+log_messages = []
+
+# Logging configuration to capture logs in memory
+class InMemoryLogHandler(logging.Handler):
+    def emit(self, record):
+        log_messages.append(self.format(record))
+        # Limit the number of log messages to prevent memory issues
+        if len(log_messages) > 1000:
+            log_messages.pop(0)
+
+# Set up logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+handler = InMemoryLogHandler()
+formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+# Now import the bot module after setting up logging
 from bot import main as bot_main, stop_bot
 
 app = Flask(__name__)
@@ -18,22 +39,6 @@ def verify_password(username, password):
     if username == USERNAME and password == PASSWORD:
         return username
     return None
-
-# In-memory log storage
-log_messages = []
-
-# Logging configuration to capture logs in memory
-class InMemoryLogHandler(logging.Handler):
-    def emit(self, record):
-        log_messages.append(self.format(record))
-
-# Set up logging
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-handler = InMemoryLogHandler()
-formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 # Global variable to control the bot's execution
 bot_thread = None
