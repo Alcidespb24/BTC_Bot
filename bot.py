@@ -1,24 +1,19 @@
 import asyncio
 import logging
 import os
-import requests
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.live import CryptoDataStream
-import config as cg
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Access environment variables for API keys
+API_KEY = os.environ.get('API_KEY')
+SECRET_KEY = os.environ.get('SECRET_KEY')
 
 # Initialize the trading client
-client = TradingClient(cg.api_key, cg.secret_key, paper=True)
+client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 
-# Global variables to hold the latest price and position state
+# Global variables
 latest_price = None
 position = None
 
@@ -28,39 +23,40 @@ ENTRY_THRESHOLD = 60000  # Example entry price threshold
 PROFIT_TARGET = 5        # Profit target in percentage
 STOP_LOSS = -2           # Stop loss in percentage
 
-# Slack webhook URL for notifications
-SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
-
-def send_slack_message(message):
-    if SLACK_WEBHOOK_URL:
-        payload = {'text': message}
-        response = requests.post(SLACK_WEBHOOK_URL, json=payload)
-        if response.status_code != 200:
-            logging.error(f"Failed to send Slack message: {response.text}")
-    else:
-        logging.warning("SLACK_WEBHOOK_URL not set. Cannot send Slack message.")
+# Bot control flag
+bot_running = False
 
 async def place_order(symbol, qty, side):
+    """
+    Places a market order and logs the order details.
+    """
     global latest_price
     try:
         order_details = MarketOrderRequest(
-            symbol=symbol.replace('/', ''),
+            symbol=symbol.replace('/', ''),  # Remove '/' for trading API
             qty=qty,
             side=side,
             time_in_force=TimeInForce.GTC
         )
+        # Run the blocking submit_order in a separate thread
         order = await asyncio.to_thread(client.submit_order, order_details)
         price = latest_price
         side_str = "Buy" if side == OrderSide.BUY else "Sell"
         logging.info(f"{side_str} order placed: {qty} {symbol} at ${price:.2f}")
-        send_slack_message(f"{side_str} order placed: {qty} {symbol} at ${price:.2f}")
         return order
     except Exception as e:
         logging.error(f"Error placing {side_str.lower()} order: {e}")
         return None
 
 async def on_quote(data):
-    global latest_price, position
+    """
+    Callback function to handle price updates from the WebSocket.
+    """
+    global latest_price, position, bot_running
+    if not bot_running:
+        logging.info("Bot is stopped. Exiting on_quote.")
+        return
+
     latest_price = float(data.bid_price)
     logging.debug(f"Received price update: {SYMBOL} at ${latest_price:.2f}")
     try:
@@ -103,7 +99,10 @@ async def on_quote(data):
         logging.error(f"Error in trading logic: {e}")
 
 async def start_price_stream():
-    crypto_stream = CryptoDataStream(cg.api_key, cg.secret_key)
+    """
+    Starts the WebSocket stream to receive real-time price updates.
+    """
+    crypto_stream = CryptoDataStream(API_KEY, SECRET_KEY)
     crypto_stream.subscribe_quotes(on_quote, SYMBOL)
     try:
         logging.info("Starting price stream...")
@@ -114,6 +113,9 @@ async def start_price_stream():
         await crypto_stream.close()
 
 async def update_position_state():
+    """
+    Initializes the position state based on current holdings.
+    """
     global position
     try:
         positions = await asyncio.to_thread(client.get_all_positions)
@@ -128,14 +130,9 @@ async def update_position_state():
     except Exception as e:
         logging.error(f"Error updating position state: {e}")
 
-async def heartbeat():
-    while True:
-        logging.info("Heartbeat: Trading bot is running.")
-        await asyncio.sleep(3600)  # Adjust interval as needed
-
 async def main():
-    # Start the heartbeat task
-    asyncio.create_task(heartbeat())
+    global bot_running
+    bot_running = True
 
     # Initialize position state
     await update_position_state()
@@ -143,6 +140,7 @@ async def main():
     # Start the price stream
     await start_price_stream()
 
-if __name__ == "__main__":
-    logging.info("Trading bot started.")
-    asyncio.run(main())
+def stop_bot():
+    global bot_running
+    bot_running = False
+    logging.info("Bot has been stopped.")
