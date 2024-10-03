@@ -1,3 +1,5 @@
+# bot.py
+
 import asyncio
 import logging
 import os
@@ -69,6 +71,7 @@ async def on_quote(data):
                 account = await asyncio.to_thread(client.get_account)
                 buying_power = float(account.buying_power) / 3
                 qty = buying_power / latest_price
+                logger.debug(f"Calculated order quantity: {qty}")
                 order = await place_order(SYMBOL, qty, OrderSide.BUY)
                 if order:
                     position = {
@@ -114,6 +117,7 @@ async def start_price_stream():
         logger.error(f"Error in price stream: {e}")
     finally:
         await crypto_stream.close()
+        logger.info("Price stream closed.")
 
 async def update_position_state():
     """
@@ -136,6 +140,7 @@ async def update_position_state():
 async def main():
     global bot_running
     bot_running = True
+    logger.info("Trading bot is running.")
 
     # Initialize position state
     await update_position_state()

@@ -1,3 +1,5 @@
+# app.py
+
 from flask import Flask, render_template_string, request, redirect, url_for
 import threading
 import logging
@@ -11,14 +13,15 @@ log_messages = []
 # Logging configuration to capture logs in memory
 class InMemoryLogHandler(logging.Handler):
     def emit(self, record):
-        log_messages.append(self.format(record))
+        log_entry = self.format(record)
+        log_messages.append(log_entry)
         # Limit the number of log messages to prevent memory issues
         if len(log_messages) > 1000:
             log_messages.pop(0)
 
-# Set up logging
+# Set up logging before importing bot to ensure bot uses the same logger
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all messages
 handler = InMemoryLogHandler()
 formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
 handler.setFormatter(formatter)
@@ -31,6 +34,7 @@ app = Flask(__name__)
 
 auth = HTTPBasicAuth()
 
+# Set username and password from environment variables
 USERNAME = os.environ.get('WEB_USERNAME', 'admin')
 PASSWORD = os.environ.get('WEB_PASSWORD', 'password')
 
@@ -40,7 +44,7 @@ def verify_password(username, password):
         return username
     return None
 
-# Global variable to control the bot's execution
+# Global variables to control the bot's execution
 bot_thread = None
 bot_running = False
 
@@ -49,27 +53,42 @@ bot_running = False
 def index():
     global bot_running
     return render_template_string('''
-        <h1>Trading Bot Control Panel</h1>
-        <form action="{{ url_for('start_bot') }}" method="post">
-            {% if not bot_running %}
-            <button type="submit">Start Bot</button>
-            {% else %}
-            <button type="submit" disabled>Bot Running</button>
-            {% endif %}
-        </form>
-        <form action="{{ url_for('stop_bot_route') }}" method="post">
-            {% if bot_running %}
-            <button type="submit">Stop Bot</button>
-            {% else %}
-            <button type="submit" disabled>Bot Stopped</button>
-            {% endif %}
-        </form>
-        <h2>Logs</h2>
-        <div style="white-space: pre-wrap; border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: scroll;">
-            {% for message in log_messages %}
-                {{ message }}<br>
-            {% endfor %}
-        </div>
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Trading Bot Control Panel</title>
+            <meta http-equiv="refresh" content="5"> <!-- Refresh every 5 seconds -->
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                h1 { color: #333; }
+                button { padding: 10px 20px; margin: 5px; }
+                .logs { white-space: pre-wrap; border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: scroll; background-color: #f9f9f9; }
+            </style>
+        </head>
+        <body>
+            <h1>Trading Bot Control Panel</h1>
+            <form action="{{ url_for('start_bot') }}" method="post">
+                {% if not bot_running %}
+                <button type="submit">Start Bot</button>
+                {% else %}
+                <button type="submit" disabled>Bot Running</button>
+                {% endif %}
+            </form>
+            <form action="{{ url_for('stop_bot_route') }}" method="post">
+                {% if bot_running %}
+                <button type="submit">Stop Bot</button>
+                {% else %}
+                <button type="submit" disabled>Bot Stopped</button>
+                {% endif %}
+            </form>
+            <h2>Logs</h2>
+            <div class="logs">
+                {% for message in log_messages %}
+                    {{ message }}<br>
+                {% endfor %}
+            </div>
+        </body>
+        </html>
     ''', bot_running=bot_running, log_messages=log_messages)
 
 @app.route('/start', methods=['POST'])
@@ -78,7 +97,7 @@ def start_bot():
     global bot_running, bot_thread
     if not bot_running:
         bot_running = True
-        bot_thread = threading.Thread(target=run_bot)
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
         bot_thread.start()
         logging.info("Bot started via web interface.")
     return redirect(url_for('index'))
@@ -97,4 +116,6 @@ def run_bot():
     asyncio.run(bot_main())
 
 if __name__ == '__main__':
+    # Use a production-ready WSGI server like Gunicorn for deployment
+    # For local testing, Flask's built-in server is sufficient
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
