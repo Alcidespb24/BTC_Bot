@@ -10,6 +10,37 @@ from order_summary import write_order_summary
 # Initialize the trading client
 client = TradingClient(cg.api_key, cg.secret_key, paper=True)
 
+# In-memory cache with TTL (Time to Live)
+cache = {
+    'account_info': None,
+    'account_timestamp': 0,
+    'latest_quote': None,
+    'quote_timestamp': 0
+}
+
+# TTL duration in seconds
+TTL_DURATION = 60  # 1 minute for cache
+
+def get_cached_account_info():
+    """
+    Fetch account info from the cache or API if cache is expired.
+    """
+    current_time = time.time()
+    if cache['account_info'] is None or (current_time - cache['account_timestamp']) > TTL_DURATION:
+        cache['account_info'] = dfi.get_account_info()
+        cache['account_timestamp'] = current_time
+    return cache['account_info']
+
+def get_cached_crypto_quote(symbol):
+    """
+    Fetch the latest crypto quote from the cache or API if cache is expired.
+    """
+    current_time = time.time()
+    if cache['latest_quote'] is None or (current_time - cache['quote_timestamp']) > TTL_DURATION:
+        cache['latest_quote'] = dfp.get_latest_crypto_quote(symbol)
+        cache['quote_timestamp'] = current_time
+    return cache['latest_quote']
+
 def place_order(symbol, qty, side):
     """
     Places a market order and logs the order details.
@@ -23,7 +54,7 @@ def place_order(symbol, qty, side):
     order = client.submit_order(order_details)
     
     # Get the latest price
-    latest_quote = dfp.get_latest_crypto_quote(symbol)
+    latest_quote = get_cached_crypto_quote(symbol)
     price = latest_quote["ask_price"].iloc[0] if side == OrderSide.BUY else latest_quote["bid_price"].iloc[0]
     side_str = "Buy" if side == OrderSide.BUY else "Sell"
     
@@ -35,10 +66,10 @@ def trading_bot():
     symbol = 'BTC/USD'
     
     while True:
-        # Get account and market data
-        account = dfi.get_account_info()
-        positions = client.get_all_positions()
-        latest_quote = dfp.get_latest_crypto_quote(f"{symbol}")
+        # Get account and market data using cache
+        account = get_cached_account_info()
+        positions = client.get_all_positions()  # Assuming this doesn’t need caching since it might change rapidly.
+        latest_quote = get_cached_crypto_quote(f"{symbol}")
         current_price = float(latest_quote['ask_price'].iloc[0])
 
         # Entry condition: Buy if price drops below a certain threshold
