@@ -1,114 +1,146 @@
+import asyncio
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
-import time
+from alpaca.trading.enums import OrderSide, TimeInForce
+
+from alpaca.data.live import CryptoDataStream
 import config as cg
-import df_price as dfp
-import df_init as dfi
 from order_summary import write_order_summary
 
 # Initialize the trading client
 client = TradingClient(cg.api_key, cg.secret_key, paper=True)
 
-# In-memory cache with TTL (Time to Live)
-cache = {
-    'account_info': None,
-    'account_timestamp': 0,
-    'latest_quote': None,
-    'quote_timestamp': 0
-}
+# Global variables to hold the latest price and position state
+latest_price = None
+position = None
 
-# TTL duration in seconds
-TTL_DURATION = 60  # 1 minute for cache
+# Set your trading parameters
+SYMBOL = 'BTC/USD'  # Use 'BTC/USD' for the data stream
+ENTRY_THRESHOLD = 60000  # Example entry price threshold
+PROFIT_TARGET = 5        # Profit target in percentage
+STOP_LOSS = -2           # Stop loss in percentage
 
-def get_cached_account_info():
-    """
-    Fetch account info from the cache or API if cache is expired.
-    """
-    current_time = time.time()
-    if cache['account_info'] is None or (current_time - cache['account_timestamp']) > TTL_DURATION:
-        cache['account_info'] = dfi.get_account_info()
-        cache['account_timestamp'] = current_time
-    return cache['account_info']
-
-def get_cached_crypto_quote(symbol):
-    """
-    Fetch the latest crypto quote from the cache or API if cache is expired.
-    """
-    current_time = time.time()
-    if cache['latest_quote'] is None or (current_time - cache['quote_timestamp']) > TTL_DURATION:
-        cache['latest_quote'] = dfp.get_latest_crypto_quote(symbol)
-        cache['quote_timestamp'] = current_time
-    return cache['latest_quote']
-
-def place_order(symbol, qty, side):
+async def place_order(symbol, qty, side):
     """
     Places a market order and logs the order details.
     """
-    order_details = MarketOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=side,
-        time_in_force=TimeInForce.GTC
-    )
-    order = client.submit_order(order_details)
-    
-    # Get the latest price
-    latest_quote = get_cached_crypto_quote(symbol)
-    price = latest_quote["ask_price"].iloc[0] if side == OrderSide.BUY else latest_quote["bid_price"].iloc[0]
-    side_str = "Buy" if side == OrderSide.BUY else "Sell"
-    
-    # Log the order summary
-    write_order_summary("Market Order", symbol, qty, price, side_str)
-    return order
+    global latest_price
+    try:
+        order_details = MarketOrderRequest(
+            symbol=symbol.replace('/', ''),  # Remove '/' for trading API
+            qty=qty,
+            side=side,
+            time_in_force=TimeInForce.GTC
+        )
+        # Run the blocking submit_order in a separate thread
+        order = await asyncio.to_thread(client.submit_order, order_details)
 
-def trading_bot():
-    symbol = 'BTC/USD'
-    
-    while True:
-        # Get account and market data using cache
-        account = get_cached_account_info()
-        positions = client.get_all_positions()  # Assuming this doesn’t need caching since it might change rapidly.
-        latest_quote = get_cached_crypto_quote(f"{symbol}")
-        current_price = float(latest_quote['ask_price'].iloc[0])
+        # Log the order summary
+        price = latest_price
+        side_str = "Buy" if side == OrderSide.BUY else "Sell"
+        write_order_summary("Market Order", symbol, qty, price, side_str)
+        print(f"{side_str} order placed at ${price} for {qty} {symbol}.")
 
-        # Entry condition: Buy if price drops below a certain threshold
-        if not positions:
-            print('No open positions. Evaluating entry conditions...')
-            # Define your entry price or condition
-            entry_price = 60000  # Example threshold
-            if current_price <= entry_price:
-                print(f"Price is ${current_price}, which is below or equal to the entry price of ${entry_price}. Placing buy order.")
-                # Calculate quantity to buy
-                buying_power = float(account['buying_power'].iloc[0]) / 3
-                buy_qty = buying_power / current_price
-                place_order(symbol, buy_qty, OrderSide.BUY)
-                entry_trade_price = current_price  # Record the price at which the trade was entered
-                print('Buy order placed.')
+        return order
+    except Exception as e:
+        print(f"Error placing order: {e}")
+        return None
+
+async def on_quote(data):
+    """
+    Callback function to handle price updates from the WebSocket.
+    """
+    global latest_price, position
+
+    latest_price = float(data.bid_price)  # Use bid_price or ask_price as appropriate
+    print(f"Received price update: {SYMBOL} at ${latest_price}")
+
+    # Trading logic
+    try:
+        if position is None:
+            # Entry condition: Buy if price drops below the threshold
+            if latest_price <= ENTRY_THRESHOLD:
+                print(f"Price ${latest_price} <= entry threshold ${ENTRY_THRESHOLD}. Evaluating buy opportunity.")
+                # Get account info once before buying
+                account = await asyncio.to_thread(client.get_account)
+                buying_power = float(account.buying_power) / 3
+                qty = buying_power / latest_price
+                order = await place_order(SYMBOL, qty, OrderSide.BUY)
+                if order:
+                    # Update the position state
+                    position = {
+                        'entry_price': latest_price,
+                        'qty': qty
+                    }
         else:
-            print('Open position detected. Evaluating exit conditions...')
-            position = positions[0]  # Assuming only one position
-            entry_trade_price = float(position.avg_entry_price)
-            qty = float(position.qty)
-            # Calculate the profit percentage
-            profit_percentage = ((current_price - entry_trade_price) / entry_trade_price) * 100
-            print(f"Current profit percentage: {profit_percentage:.2f}%")
+            # Calculate profit percentage
+            entry_price = position['entry_price']
+            profit_percentage = ((latest_price - entry_price) / entry_price) * 100
+            print(f"Current profit: {profit_percentage:.2f}%")
 
-            # Exit condition: Sell if profit is 5% or more
-            if profit_percentage >= 5:
+            # Exit conditions
+            if profit_percentage >= PROFIT_TARGET:
                 print(f"Profit target reached ({profit_percentage:.2f}%). Placing sell order.")
-                place_order(symbol, qty, OrderSide.SELL)
-                print('Sell order placed.')
-            # Stop-loss condition: Sell if loss exceeds 2%
-            elif profit_percentage <= -2:
+                qty = position['qty']
+                order = await place_order(SYMBOL, qty, OrderSide.SELL)
+                if order:
+                    # Reset the position state
+                    position = None
+            elif profit_percentage <= STOP_LOSS:
                 print(f"Stop-loss triggered ({profit_percentage:.2f}%). Placing sell order.")
-                place_order(symbol, qty, OrderSide.SELL)
-                print('Sell order placed.')
+                qty = position['qty']
+                order = await place_order(SYMBOL, qty, OrderSide.SELL)
+                if order:
+                    # Reset the position state
+                    position = None
+                else:
+                    print("Sell order failed.")
             else:
-                print('Holding position. No action taken.')
+                print("No action taken. Holding position.")
+    except Exception as e:
+        print(f"Error in trading logic: {e}")
 
-        # Wait for a specified interval before checking again
-        time.sleep(300)  # Wait for 5 minutes
+async def start_price_stream():
+    """
+    Starts the WebSocket stream to receive real-time price updates.
+    """
+    crypto_stream = CryptoDataStream(cg.api_key, cg.secret_key)
 
-# Run the trading bot
-trading_bot()
+    # Subscribe to the crypto quote stream
+    crypto_stream.subscribe_quotes(on_quote, SYMBOL)
+
+    try:
+        print("Starting price stream...")
+        await crypto_stream._run_forever()
+    except Exception as e:
+        print(f"Error in price stream: {e}")
+    finally:
+        await crypto_stream.close()
+
+async def update_position_state():
+    """
+    Initializes the position state based on current holdings.
+    """
+    global position
+    try:
+        positions = await asyncio.to_thread(client.get_all_positions)
+        for pos in positions:
+            if pos.symbol == SYMBOL.replace('/', ''):
+                position = {
+                    'entry_price': float(pos.avg_entry_price),
+                    'qty': float(pos.qty)
+                }
+                print(f"Existing position detected: {position}")
+                break
+    except Exception as e:
+        print(f"Error updating position state: {e}")
+
+async def main():
+    # Initialize position state
+    await update_position_state()
+
+    # Start the price stream
+    await start_price_stream()
+
+if __name__ == "__main__":
+    asyncio.run(main())
