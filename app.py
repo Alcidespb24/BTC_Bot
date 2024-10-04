@@ -279,14 +279,7 @@ def update_threshold():
     return redirect(url_for('index'))
 
 def run_bot():
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot_main(config, config_lock))
-    except Exception as e:
-        bot_logger.error(f"Bot encountered an exception: {e}")
-    finally:
-        loop.close()
+    asyncio.run(bot_main(config, config_lock))
 
 if __name__ == '__main__':
     # For local testing, use Flask's built-in server
