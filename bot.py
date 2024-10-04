@@ -28,8 +28,10 @@ STOP_LOSS = -2             # Stop loss in percentage
 # Bot control flag
 bot_running = False
 
-# Use the root logger
-logger = logging.getLogger()
+# Configure a dedicated logger for the bot
+logger = logging.getLogger('bot')
+logger.setLevel(logging.INFO)  # Set to INFO to capture relevant messages
+logger.propagate = False      # Prevent log messages from being passed to the root logger
 
 async def place_order(symbol, qty, side):
     """
@@ -63,7 +65,7 @@ async def on_quote(data):
         return
 
     latest_price = float(data.bid_price)
-    logger.debug(f"Received price update: {SYMBOL} at ${latest_price:.2f}")
+    logger.info(f"Received price update: {SYMBOL} at ${latest_price:.2f}")
     try:
         if position is None:
             if latest_price <= ENTRY_THRESHOLD:
@@ -71,7 +73,7 @@ async def on_quote(data):
                 account = await asyncio.to_thread(client.get_account)
                 buying_power = float(account.buying_power) / 3
                 qty = buying_power / latest_price
-                logger.debug(f"Calculated order quantity: {qty}")
+                logger.info(f"Calculated order quantity: {qty}")
                 order = await place_order(SYMBOL, qty, OrderSide.BUY)
                 if order:
                     position = {
@@ -100,7 +102,7 @@ async def on_quote(data):
                 else:
                     logger.error("Sell order failed.")
             else:
-                logger.debug("No action taken. Holding position.")
+                logger.info("No action taken. Holding position.")
     except Exception as e:
         logger.error(f"Error in trading logic: {e}")
 
