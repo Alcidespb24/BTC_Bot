@@ -26,8 +26,27 @@ def verify_password(username, password):
     return None
 
 # Redis connection
+import ssl
+
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
-redis_client = redis.Redis.from_url(REDIS_URL)
+
+if REDIS_URL.startswith('rediss://'):
+    # SSL/TLS connection to Heroku Redis
+    redis_client = redis.Redis.from_url(
+        REDIS_URL,
+        ssl=True,
+        ssl_cert_reqs=None  # Disables SSL certificate verification
+    )
+else:
+    # Non-SSL connection (local development)
+    redis_client = redis.Redis.from_url(REDIS_URL)
+
+# Test the Redis connection
+try:
+    redis_client.ping()
+    app.logger.info("Connected to Redis successfully.")
+except redis.ConnectionError as e:
+    app.logger.error(f"Redis connection error: {e}")
 
 # Shared configuration dictionary
 config = {

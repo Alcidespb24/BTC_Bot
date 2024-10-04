@@ -14,6 +14,7 @@ from alpaca.data.live import CryptoDataStream
 
 import redis
 import json
+import ssl
 
 # Access environment variables for API keys
 API_KEY = os.environ.get('API_KEY')
@@ -24,7 +25,24 @@ client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 
 # Redis connection
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
-redis_client = redis.Redis.from_url(REDIS_URL)
+
+if REDIS_URL.startswith('rediss://'):
+    # SSL/TLS connection to Heroku Redis
+    redis_client = redis.Redis.from_url(
+        REDIS_URL,
+        ssl=True,
+        ssl_cert_reqs=None  # Disables SSL certificate verification
+    )
+else:
+    # Non-SSL connection (local development)
+    redis_client = redis.Redis.from_url(REDIS_URL)
+
+# Test the Redis connection
+try:
+    redis_client.ping()
+    print("Connected to Redis successfully.")
+except redis.ConnectionError as e:
+    print(f"Redis connection error: {e}")
 
 # Global variables
 latest_price = None
