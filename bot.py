@@ -115,20 +115,39 @@ async def on_quote(data, config, config_lock):
 
 async def start_price_stream(config, config_lock):
     """
-    Starts the WebSocket stream to receive real-time price updates.
+    Starts the WebSocket stream to receive real-time price updates with exponential backoff.
     """
     crypto_stream = CryptoDataStream(API_KEY, SECRET_KEY)
-    # Use functools.partial to pass config and config_lock to on_quote
     callback = partial(on_quote, config=config, config_lock=config_lock)
     crypto_stream.subscribe_quotes(callback, SYMBOL)
-    try:
-        logger.info("Starting price stream...")
-        await crypto_stream._run_forever()
-    except Exception as e:
-        logger.error(f"Error in price stream: {e}")
-    finally:
-        await crypto_stream.close()
-        logger.info("Price stream closed.")
+    
+    backoff = 1  # Start with a 1-second delay
+    max_backoff = 60  # Maximum delay of 60 seconds
+    max_retries = 10  # Maximum number of reconnection attempts
+    retries = 0
+    
+    while bot_running and retries < max_retries:
+        try:
+            logger.info("Starting price stream...")
+            await crypto_stream._run_forever()
+        except ValueError as ve:
+            logger.error(f"ValueError encountered: {ve}. Backing off for {backoff} seconds.")
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}. Backing off for {backoff} seconds.")
+        
+        # Wait before attempting to reconnect
+        await asyncio.sleep(backoff)
+        
+        # Exponential backoff
+        backoff = min(backoff * 2, max_backoff)
+        retries += 1
+    
+    if retries >= max_retries:
+        logger.error("Maximum reconnection attempts reached. Bot will stop.")
+        bot_running = False
+    
+    await crypto_stream.close()
+    logger.info("Price stream closed.")
 
 async def update_position_state():
     """

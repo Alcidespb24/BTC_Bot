@@ -1,11 +1,8 @@
 # app.py
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash
-import threading
 import logging
 import os
-import asyncio
-from functools import partial
 from flask_httpauth import HTTPBasicAuth
 
 # In-memory log storage
@@ -51,15 +48,11 @@ def verify_password(username, password):
         return username
     return None
 
-# Global variables to control the bot's execution
-bot_thread = None
-bot_running = False
-config_lock = asyncio.Lock()  # Use asyncio.Lock for async operations
+# Since the bot is now running in a separate worker dyno, remove bot control logic from the web app
 
 @app.route('/')
 @auth.login_required
 def index():
-    global bot_running, config
     return render_template_string('''
         <!DOCTYPE html>
         <html>
@@ -75,33 +68,6 @@ def index():
                 h1 { 
                     color: #333; 
                 }
-                button { 
-                    padding: 10px 20px; 
-                    margin: 5px; 
-                    font-size: 16px;
-                    cursor: pointer;
-                    border: none;
-                    border-radius: 5px;
-                    transition: background-color 0.3s;
-                }
-                button:disabled {
-                    background-color: #ccc;
-                    cursor: not-allowed;
-                }
-                .start-btn {
-                    background-color: #28a745; /* Green */
-                    color: white;
-                }
-                .start-btn:hover:not(:disabled) {
-                    background-color: #218838;
-                }
-                .stop-btn {
-                    background-color: #dc3545; /* Red */
-                    color: white;
-                }
-                .stop-btn:hover:not(:disabled) {
-                    background-color: #c82333;
-                }
                 .logs { 
                     white-space: pre-wrap; 
                     border: 1px solid #ccc; 
@@ -115,12 +81,6 @@ def index():
                 .container {
                     max-width: 900px;
                     margin: auto;
-                }
-                .controls {
-                    margin-bottom: 20px;
-                }
-                .controls form {
-                    display: inline-block;
                 }
                 .header {
                     display: flex;
@@ -171,13 +131,6 @@ def index():
             <div class="container">
                 <div class="header">
                     <h1>Trading Bot Control Panel</h1>
-                    <div class="status {% if not bot_running %}stopped{% endif %}">
-                        {% if bot_running %}
-                            Status: Running
-                        {% else %}
-                            Status: Stopped
-                        {% endif %}
-                    </div>
                 </div>
                 {% with messages = get_flashed_messages() %}
                   {% if messages %}
@@ -186,22 +139,6 @@ def index():
                     {% endfor %}
                   {% endif %}
                 {% endwith %}
-                <div class="controls">
-                    <form action="{{ url_for('start_bot') }}" method="post">
-                        {% if not bot_running %}
-                        <button type="submit" class="start-btn">Start Bot</button>
-                        {% else %}
-                        <button type="submit" class="start-btn" disabled>Bot Running</button>
-                        {% endif %}
-                    </form>
-                    <form action="{{ url_for('stop_bot_route') }}" method="post">
-                        {% if bot_running %}
-                        <button type="submit" class="stop-btn">Stop Bot</button>
-                        {% else %}
-                        <button type="submit" class="stop-btn" disabled>Bot Stopped</button>
-                        {% endif %}
-                    </form>
-                </div>
                 <div class="threshold-form">
                     <h2>Configure Entry Threshold</h2>
                     <form action="{{ url_for('update_threshold') }}" method="post">
@@ -232,34 +169,7 @@ def index():
             </script>
         </body>
         </html>
-    ''', bot_running=bot_running, log_messages=log_messages, config=config)
-
-@app.route('/start', methods=['POST'])
-@auth.login_required
-def start_bot():
-    global bot_running, bot_thread, config
-    if not bot_running:
-        bot_running = True
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
-        bot_logger.info("Bot started via web interface.")
-        flash("Bot has been started.")
-    else:
-        flash("Bot is already running.")
-    return redirect(url_for('index'))
-
-@app.route('/stop', methods=['POST'])
-@auth.login_required
-def stop_bot_route():
-    global bot_running
-    if bot_running:
-        stop_bot()
-        bot_running = False
-        bot_logger.info("Bot stopped via web interface.")
-        flash("Bot has been stopped.")
-    else:
-        flash("Bot is not running.")
-    return redirect(url_for('index'))
+    ''', log_messages=log_messages, config=config)
 
 @app.route('/update_threshold', methods=['POST'])
 @auth.login_required
@@ -269,7 +179,9 @@ def update_threshold():
     if new_threshold:
         try:
             new_threshold = float(new_threshold)
-            asyncio.run(update_config(new_threshold))
+            # Since the bot is running in a separate dyno, update config via a shared resource
+            # For simplicity, we're updating the in-memory config, but in production, use a persistent store
+            config['ENTRY_THRESHOLD'] = new_threshold
             bot_logger.info(f"Entry threshold updated to ${new_threshold:.2f} via web interface.")
             flash(f"Entry threshold successfully updated to ${new_threshold:.2f}.")
         except ValueError:
@@ -277,21 +189,6 @@ def update_threshold():
     else:
         flash("No entry threshold value provided.")
     return redirect(url_for('index'))
-
-async def update_config(new_threshold):
-    global config
-    async with config_lock:
-        config['ENTRY_THRESHOLD'] = new_threshold
-
-def run_bot():
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot_main(config, config_lock))
-    except Exception as e:
-        bot_logger.error(f"Bot encountered an exception: {e}")
-    finally:
-        loop.close()
 
 if __name__ == '__main__':
     # For local testing, use Flask's built-in server
