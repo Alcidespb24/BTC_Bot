@@ -1,6 +1,6 @@
 # app.py
 
-from flask import Flask, render_template_string, request, redirect, url_for
+from flask import Flask, render_template_string, request, redirect, url_for, flash
 import threading
 import logging
 import os
@@ -9,6 +9,11 @@ from flask_httpauth import HTTPBasicAuth
 
 # In-memory log storage
 log_messages = []
+
+# Shared configuration dictionary
+config = {
+    'ENTRY_THRESHOLD': 60000  # Default value
+}
 
 # Logging configuration to capture logs from 'bot' logger
 class InMemoryLogHandler(logging.Handler):
@@ -31,6 +36,7 @@ bot_logger.addHandler(handler)
 from bot import main as bot_main, stop_bot
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'supersecretkey')  # For flashing messages
 
 auth = HTTPBasicAuth()
 
@@ -47,11 +53,12 @@ def verify_password(username, password):
 # Global variables to control the bot's execution
 bot_thread = None
 bot_running = False
+config_lock = threading.Lock()  # To ensure thread-safe access to config
 
 @app.route('/')
 @auth.login_required
 def index():
-    global bot_running
+    global bot_running, config
     return render_template_string('''
         <!DOCTYPE html>
         <html>
@@ -129,9 +136,33 @@ def index():
                 .status {
                     font-size: 18px;
                     color: #28a745;
+                    font-weight: bold;
                 }
                 .status.stopped {
                     color: #dc3545;
+                }
+                .threshold-form {
+                    margin-top: 20px;
+                }
+                .threshold-form input {
+                    padding: 8px;
+                    font-size: 16px;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                    width: 150px;
+                }
+                .threshold-form button {
+                    padding: 8px 16px;
+                    font-size: 16px;
+                    margin-left: 10px;
+                }
+                .flash {
+                    padding: 10px;
+                    background-color: #d4edda;
+                    color: #155724;
+                    border: 1px solid #c3e6cb;
+                    border-radius: 4px;
+                    margin-bottom: 20px;
                 }
             </style>
         </head>
@@ -139,7 +170,7 @@ def index():
             <div class="container">
                 <div class="header">
                     <h1>Trading Bot Control Panel</h1>
-                    <div class="status">
+                    <div class="status {% if not bot_running %}stopped{% endif %}">
                         {% if bot_running %}
                             Status: Running
                         {% else %}
@@ -147,6 +178,13 @@ def index():
                         {% endif %}
                     </div>
                 </div>
+                {% with messages = get_flashed_messages() %}
+                  {% if messages %}
+                    {% for message in messages %}
+                      <div class="flash">{{ message }}</div>
+                    {% endfor %}
+                  {% endif %}
+                {% endwith %}
                 <div class="controls">
                     <form action="{{ url_for('start_bot') }}" method="post">
                         {% if not bot_running %}
@@ -163,26 +201,50 @@ def index():
                         {% endif %}
                     </form>
                 </div>
+                <div class="threshold-form">
+                    <h2>Configure Entry Threshold</h2>
+                    <form action="{{ url_for('update_threshold') }}" method="post">
+                        <label for="entry_threshold">Entry Threshold ($): </label>
+                        <input type="number" id="entry_threshold" name="entry_threshold" min="0" step="100" value="{{ config['ENTRY_THRESHOLD'] }}" required>
+                        <button type="submit">Update Threshold</button>
+                    </form>
+                </div>
                 <h2>Logs</h2>
-                <div class="logs">
+                <div class="logs" id="logContainer">
                     {% for message in log_messages %}
-                        {{ message }}<br>
+                        {% if 'ERROR' in message %}
+                            <span style="color: red;">{{ message }}</span><br>
+                        {% elif 'WARNING' in message %}
+                            <span style="color: orange;">{{ message }}</span><br>
+                        {% elif 'INFO' in message %}
+                            <span style="color: green;">{{ message }}</span><br>
+                        {% else %}
+                            {{ message }}<br>
+                        {% endif %}
                     {% endfor %}
                 </div>
             </div>
+            <script>
+                // Auto-scroll to the bottom of the logs div
+                var logContainer = document.getElementById("logContainer");
+                logContainer.scrollTop = logContainer.scrollHeight;
+            </script>
         </body>
         </html>
-    ''', bot_running=bot_running, log_messages=log_messages)
+    ''', bot_running=bot_running, log_messages=log_messages, config=config)
 
 @app.route('/start', methods=['POST'])
 @auth.login_required
 def start_bot():
-    global bot_running, bot_thread
+    global bot_running, bot_thread, config
     if not bot_running:
         bot_running = True
         bot_thread = threading.Thread(target=run_bot, daemon=True)
         bot_thread.start()
         bot_logger.info("Bot started via web interface.")
+        flash("Bot has been started.")
+    else:
+        flash("Bot is already running.")
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
@@ -193,12 +255,33 @@ def stop_bot_route():
         stop_bot()
         bot_running = False
         bot_logger.info("Bot stopped via web interface.")
+        flash("Bot has been stopped.")
+    else:
+        flash("Bot is not running.")
+    return redirect(url_for('index'))
+
+@app.route('/update_threshold', methods=['POST'])
+@auth.login_required
+def update_threshold():
+    global config
+    new_threshold = request.form.get('entry_threshold')
+    if new_threshold:
+        try:
+            new_threshold = float(new_threshold)
+            with config_lock:
+                config['ENTRY_THRESHOLD'] = new_threshold
+            bot_logger.info(f"Entry threshold updated to ${new_threshold:.2f} via web interface.")
+            flash(f"Entry threshold successfully updated to ${new_threshold:.2f}.")
+        except ValueError:
+            flash("Invalid entry threshold value.")
+    else:
+        flash("No entry threshold value provided.")
     return redirect(url_for('index'))
 
 def run_bot():
-    asyncio.run(bot_main())
+    asyncio.run(bot_main(config, config_lock))
 
 if __name__ == '__main__':
     # For local testing, use Flask's built-in server
-    # For production, use Gunicorn as specified in the Procfile
+    # For production, Gunicorn handles running the app
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

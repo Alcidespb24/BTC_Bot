@@ -21,7 +21,6 @@ position = None
 
 # Set your trading parameters
 SYMBOL = 'BTC/USD'         # Use 'BTC/USD' for the data stream
-ENTRY_THRESHOLD = 60000    # Example entry price threshold
 PROFIT_TARGET = 5          # Profit target in percentage
 STOP_LOSS = -2             # Stop loss in percentage
 
@@ -32,6 +31,9 @@ bot_running = False
 logger = logging.getLogger('bot')
 logger.setLevel(logging.INFO)  # Set to INFO to capture relevant messages
 logger.propagate = False      # Prevent log messages from being passed to the root logger
+
+# To handle graceful shutdowns
+stop_event = asyncio.Event()
 
 async def place_order(symbol, qty, side):
     """
@@ -49,13 +51,13 @@ async def place_order(symbol, qty, side):
         order = await asyncio.to_thread(client.submit_order, order_details)
         price = latest_price
         side_str = "Buy" if side == OrderSide.BUY else "Sell"
-        logger.info(f"{side_str} order placed: {qty} {symbol} at ${price:.2f}")
+        logger.info(f"{side_str} order placed: {qty:.6f} {symbol} at ${price:.2f}")
         return order
     except Exception as e:
         logger.error(f"Error placing {side_str.lower()} order: {e}")
         return None
 
-async def on_quote(data):
+async def on_quote(data, config, config_lock):
     """
     Callback function to handle price updates from the WebSocket.
     """
@@ -67,20 +69,24 @@ async def on_quote(data):
     latest_price = float(data.bid_price)
     logger.info(f"Received price update: {SYMBOL} at ${latest_price:.2f}")
     try:
+        # Access the dynamic ENTRY_THRESHOLD
+        with config_lock:
+            entry_threshold = config.get('ENTRY_THRESHOLD', 60000)  # Default if not set
+
         if position is None:
-            if latest_price <= ENTRY_THRESHOLD:
-                logger.info(f"Price ${latest_price:.2f} <= entry threshold ${ENTRY_THRESHOLD}. Evaluating buy opportunity.")
+            if latest_price <= entry_threshold:
+                logger.info(f"Price ${latest_price:.2f} <= entry threshold ${entry_threshold:.2f}. Evaluating buy opportunity.")
                 account = await asyncio.to_thread(client.get_account)
                 buying_power = float(account.buying_power) / 3
                 qty = buying_power / latest_price
-                logger.info(f"Calculated order quantity: {qty}")
+                logger.info(f"Calculated order quantity: {qty:.6f}")
                 order = await place_order(SYMBOL, qty, OrderSide.BUY)
                 if order:
                     position = {
                         'entry_price': latest_price,
                         'qty': qty
                     }
-                    logger.info(f"Entered position: Bought {qty} {SYMBOL} at ${latest_price:.2f}")
+                    logger.info(f"Entered position: Bought {qty:.6f} {SYMBOL} at ${latest_price:.2f}")
         else:
             entry_price = position['entry_price']
             profit_percentage = ((latest_price - entry_price) / entry_price) * 100
@@ -91,14 +97,14 @@ async def on_quote(data):
                 order = await place_order(SYMBOL, qty, OrderSide.SELL)
                 if order:
                     position = None
-                    logger.info(f"Exited position: Sold {qty} {SYMBOL} at ${latest_price:.2f}")
+                    logger.info(f"Exited position: Sold {qty:.6f} {SYMBOL} at ${latest_price:.2f}")
             elif profit_percentage <= STOP_LOSS:
                 logger.info(f"Stop-loss triggered ({profit_percentage:.2f}%). Placing sell order.")
                 qty = position['qty']
                 order = await place_order(SYMBOL, qty, OrderSide.SELL)
                 if order:
                     position = None
-                    logger.info(f"Exited position: Sold {qty} {SYMBOL} at ${latest_price:.2f} due to stop-loss")
+                    logger.info(f"Exited position: Sold {qty:.6f} {SYMBOL} at ${latest_price:.2f} due to stop-loss")
                 else:
                     logger.error("Sell order failed.")
             else:
@@ -106,12 +112,12 @@ async def on_quote(data):
     except Exception as e:
         logger.error(f"Error in trading logic: {e}")
 
-async def start_price_stream():
+async def start_price_stream(config, config_lock):
     """
     Starts the WebSocket stream to receive real-time price updates.
     """
     crypto_stream = CryptoDataStream(API_KEY, SECRET_KEY)
-    crypto_stream.subscribe_quotes(on_quote, SYMBOL)
+    crypto_stream.subscribe_quotes(on_quote, SYMBOL, config=config, config_lock=config_lock)
     try:
         logger.info("Starting price stream...")
         await crypto_stream._run_forever()
@@ -139,7 +145,7 @@ async def update_position_state():
     except Exception as e:
         logger.error(f"Error updating position state: {e}")
 
-async def main():
+async def main(config, config_lock):
     global bot_running
     bot_running = True
     logger.info("Trading bot is running.")
@@ -148,9 +154,20 @@ async def main():
     await update_position_state()
 
     # Start the price stream
-    await start_price_stream()
+    await start_price_stream(config, config_lock)
 
 def stop_bot():
     global bot_running
     bot_running = False
     logger.info("Bot has been stopped.")
+
+if __name__ == "__main__":
+    # This block allows the bot to be run independently if needed
+    import sys
+    import json
+
+    if len(sys.argv) > 1 and sys.argv[1] == 'run':
+        # Example usage: python bot.py run
+        # Load configuration from a file or environment variables as needed
+        # For simplicity, we'll use default config
+        asyncio.run(main(config, config_lock))
