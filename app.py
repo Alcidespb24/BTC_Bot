@@ -1,303 +1,218 @@
-# bot.py
+# app.py
 
-import asyncio
+from flask import Flask, render_template_string, request, redirect, url_for, flash
 import logging
 import os
-import signal
-from functools import partial
-from threading import Lock
+from flask_httpauth import HTTPBasicAuth
 
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.models import Order
-from alpaca.data.live import CryptoDataStream
+app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'supersecretkey')  # For flashing messages
 
-# Access environment variables for API keys
-API_KEY = os.environ.get('API_KEY')
-SECRET_KEY = os.environ.get('SECRET_KEY')
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
-# Initialize the trading client
-client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+auth = HTTPBasicAuth()
 
-# Global variables
-latest_price = None
-position = None
+# Set username and password from environment variables
+USERNAME = os.environ.get('WEB_USERNAME', 'admin')
+PASSWORD = os.environ.get('WEB_PASSWORD', 'password')
 
-# Set your trading parameters
-SYMBOL = 'BTC/USD'         # Use 'BTC/USD' for the data stream
-PROFIT_TARGET = 5          # Profit target in percentage
-STOP_LOSS = -2             # Stop loss in percentage
+@auth.verify_password
+def verify_password(username, password):
+    if username == USERNAME and password == PASSWORD:
+        return username
+    return None
 
-# Bot control flag
-bot_running = False
-
-# Configure a dedicated logger for the bot
-logger = logging.getLogger('bot')
-logger.setLevel(logging.INFO)  # Set to INFO to capture relevant messages
-logger.propagate = False      # Prevent log messages from being passed to the root logger
-
-# In-memory state shared with the web app
-bot_state = {
-    'status': 'Initializing',
-    'position': None,
-    'latest_price': None,
-    'account_balance': None,
-    'pnl': None,
-    'pnl_history': [],
-    'execute_trade': False
+# Shared configuration dictionary
+config = {
+    'ENTRY_THRESHOLD': 60000  # Default value
 }
 
-state_lock = Lock()
+# In-memory log storage (for simplicity)
+log_messages = []
 
-# To handle graceful shutdowns
-stop_event = asyncio.Event()
+@app.route('/')
+@auth.login_required
+def index():
+    # Since the bot is running separately, we'll need to get the bot's state via a shared resource.
+    # For now, we'll display placeholder data.
 
-async def place_order(symbol, qty, side):
-    """
-    Places a market order and logs the order details.
-    """
-    global latest_price
-    try:
-        order_details = MarketOrderRequest(
-            symbol=symbol.replace('/', ''),  # Remove '/' for trading API
-            qty=qty,
-            side=side,
-            time_in_force=TimeInForce.GTC
-        )
-        # Run the blocking submit_order in a separate thread
-        order: Order = await asyncio.to_thread(client.submit_order, order_details)
-        price = latest_price
-        side_str = "Buy" if side == OrderSide.BUY else "Sell"
-        logger.info(f"{side_str} order placed: {qty:.6f} {symbol} at ${price:.2f}")
-        return order
-    except Exception as e:
-        logger.error(f"Error placing {side.name.lower()} order: {e}")
-        return None
-
-def calculate_current_pnl():
-    """
-    Calculates the current profit and loss.
-    """
-    global position, latest_price
-    if position and latest_price:
-        entry_price = position['entry_price']
-        qty = position['qty']
-        pnl = (latest_price - entry_price) * qty
-        return pnl
-    return 0.0
-
-async def on_quote(data, config, config_lock, state_lock):
-    """
-    Callback function to handle price updates from the WebSocket.
-    """
-    global latest_price, position, bot_running
-    if not bot_running:
-        logger.info("Bot is stopped. Exiting on_quote.")
-        return
-
-    latest_price = float(data.bid_price)
-    logger.info(f"Received price update: {SYMBOL} at ${latest_price:.2f}")
-
-    # Update shared state
-    with state_lock:
-        bot_state['latest_price'] = latest_price
-
-    try:
-        # Access the dynamic ENTRY_THRESHOLD
-        async with config_lock:
-            entry_threshold = config.get('ENTRY_THRESHOLD', 60000)  # Default if not set
-
-        # Check if manual trade execution is requested
-        with state_lock:
-            execute_trade = bot_state.get('execute_trade', False)
-            if execute_trade:
-                bot_state['execute_trade'] = False  # Reset the flag
-                logger.info("Manual trade execution requested.")
-                # Place buy order regardless of entry threshold
-                if position is None:
-                    await enter_position()
-                else:
-                    logger.info("Already in position. Manual trade execution ignored.")
-
-        if position is None:
-            with state_lock:
-                bot_state['status'] = 'Waiting to Enter Trade'
-
-            if latest_price <= entry_threshold:
-                logger.info(f"Price ${latest_price:.2f} <= entry threshold ${entry_threshold:.2f}. Evaluating buy opportunity.")
-                await enter_position()
-        else:
-            with state_lock:
-                bot_state['status'] = 'In Position'
-
-            entry_price = position['entry_price']
-            profit_percentage = ((latest_price - entry_price) / entry_price) * 100
-            logger.info(f"Current profit: {profit_percentage:.2f}%")
-            with state_lock:
-                bot_state['pnl'] = calculate_current_pnl()
-
-            # Record P/L history
-            with state_lock:
-                bot_state['pnl_history'].append({
-                    'time': asyncio.get_event_loop().time(),
-                    'pnl': bot_state['pnl']
-                })
-                # Limit the history to the last 1000 entries
-                bot_state['pnl_history'] = bot_state['pnl_history'][-1000:]
-
-            if profit_percentage >= PROFIT_TARGET:
-                logger.info(f"Profit target reached ({profit_percentage:.2f}%). Placing sell order.")
-                await exit_position(reason='Profit target reached')
-            elif profit_percentage <= STOP_LOSS:
-                logger.info(f"Stop-loss triggered ({profit_percentage:.2f}%). Placing sell order.")
-                await exit_position(reason='Stop-loss triggered')
-            else:
-                logger.info("No action taken. Holding position.")
-    except Exception as e:
-        logger.error(f"Error in trading logic: {e}")
-
-async def enter_position():
-    global position, latest_price
-    try:
-        account = await asyncio.to_thread(client.get_account)
-        buying_power = float(account.buying_power) / 3
-        qty = buying_power / latest_price
-        logger.info(f"Calculated order quantity: {qty:.6f}")
-        order = await place_order(SYMBOL, qty, OrderSide.BUY)
-        if order:
-            position = {
-                'entry_price': latest_price,
-                'qty': qty
-            }
-            logger.info(f"Entered position: Bought {qty:.6f} {SYMBOL} at ${latest_price:.2f}")
-            with state_lock:
-                bot_state['position'] = position
-        else:
-            logger.error("Failed to enter position.")
-    except Exception as e:
-        logger.error(f"Error entering position: {e}")
-
-async def exit_position(reason=''):
-    global position, latest_price
-    if position is None:
-        logger.info("No position to exit.")
-        return
-    try:
-        qty = position['qty']
-        order = await place_order(SYMBOL, qty, OrderSide.SELL)
-        if order:
-            logger.info(f"Exited position: Sold {qty:.6f} {SYMBOL} at ${latest_price:.2f}. Reason: {reason}")
-            position = None
-            with state_lock:
-                bot_state['position'] = None
-        else:
-            logger.error("Failed to exit position.")
-    except Exception as e:
-        logger.error(f"Error exiting position: {e}")
-
-async def start_price_stream(config, config_lock):
-    """
-    Starts the WebSocket stream to receive real-time price updates with exponential backoff.
-    """
-    crypto_stream = CryptoDataStream(API_KEY, SECRET_KEY)
-    callback = partial(on_quote, config=config, config_lock=config_lock, state_lock=state_lock)
-    await crypto_stream.subscribe_quotes(callback, SYMBOL)
-
-    backoff = 1  # Start with a 1-second delay
-    max_backoff = 60  # Maximum delay of 60 seconds
-    max_retries = 10  # Maximum number of reconnection attempts
-    retries = 0
-
-    while bot_running and retries < max_retries:
-        try:
-            logger.info("Starting price stream...")
-            await crypto_stream._connect()
-            await crypto_stream._handle_messages()
-        except Exception as e:
-            logger.error(f"Error in price stream: {e}. Backing off for {backoff} seconds.")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_backoff)
-            retries += 1
-
-    if retries >= max_retries:
-        logger.error("Maximum reconnection attempts reached. Bot will stop.")
-        bot_running = False
-
-    await crypto_stream.close()
-    logger.info("Price stream closed.")
-
-async def update_position_state():
-    """
-    Initializes the position state based on current holdings.
-    """
-    global position
-    try:
-        positions = await asyncio.to_thread(client.get_all_positions)
-        for pos in positions:
-            if pos.symbol == SYMBOL.replace('/', ''):
-                position = {
-                    'entry_price': float(pos.avg_entry_price),
-                    'qty': float(pos.qty)
-                }
-                logger.info(f"Existing position detected: {position}")
-                with state_lock:
-                    bot_state['position'] = position
-                break
-    except Exception as e:
-        logger.error(f"Error updating position state: {e}")
-
-async def update_account_balance():
-    """
-    Periodically updates the account balance.
-    """
-    while bot_running:
-        try:
-            account = await asyncio.to_thread(client.get_account)
-            cash = float(account.cash)
-            with state_lock:
-                bot_state['account_balance'] = cash
-            await asyncio.sleep(60)  # Update every 60 seconds
-        except Exception as e:
-            logger.error(f"Error updating account balance: {e}")
-            await asyncio.sleep(60)
-
-async def main(config, config_lock):
-    global bot_running
-    bot_running = True
-    logger.info("Trading bot is running.")
-
-    # Handle shutdown signals
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_bot)
-
-    # Initialize position state
-    await update_position_state()
-
-    # Start the price stream and account updater concurrently
-    await asyncio.gather(
-        start_price_stream(config, config_lock),
-        update_account_balance(),
-    )
-
-def stop_bot():
-    global bot_running
-    bot_running = False
-    logger.info("Bot has been stopped.")
-
-if __name__ == "__main__":
-    # This block allows the bot to be run independently if needed
-    import sys
-
-    # Define default config and config_lock for standalone execution
-    config = {
-        'ENTRY_THRESHOLD': 60000  # Default value
+    state = {
+        'status': 'Unknown',          # Placeholder status
+        'latest_price': 'N/A',        # Placeholder latest price
+        'account_balance': 'N/A',     # Placeholder account balance
+        'position': None,             # No position data
+        'pnl': 'N/A'                  # Placeholder P/L
     }
-    config_lock = asyncio.Lock()
 
-    if len(sys.argv) > 1 and sys.argv[1] == 'run':
-        # Example usage: python bot.py run
-        # Load configuration from a file or environment variables as needed
-        # For simplicity, we'll use default config
-        asyncio.run(main(config, config_lock))
+    return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Trading Bot Control Panel</title>
+            <meta http-equiv="refresh" content="5"> <!-- Refresh every 5 seconds -->
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    margin: 20px; 
+                    background-color: #f0f2f5;
+                }
+                h1 { 
+                    color: #333; 
+                }
+                .logs { 
+                    white-space: pre-wrap; 
+                    border: 1px solid #ccc; 
+                    padding: 10px; 
+                    height: 400px; 
+                    overflow-y: scroll; 
+                    background-color: #fff;
+                    border-radius: 5px;
+                    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                }
+                .container {
+                    max-width: 900px;
+                    margin: auto;
+                }
+                .header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                .header div {
+                    display: flex;
+                    align-items: center;
+                }
+                .header h1 {
+                    margin: 0;
+                }
+                .status {
+                    font-size: 18px;
+                    color: #28a745;
+                    font-weight: bold;
+                }
+                .status.stopped {
+                    color: #dc3545;
+                }
+                .threshold-form {
+                    margin-top: 20px;
+                }
+                .threshold-form input {
+                    padding: 8px;
+                    font-size: 16px;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                    width: 150px;
+                }
+                .threshold-form button {
+                    padding: 8px 16px;
+                    font-size: 16px;
+                    margin-left: 10px;
+                }
+                .flash {
+                    padding: 10px;
+                    background-color: #d4edda;
+                    color: #155724;
+                    border: 1px solid #c3e6cb;
+                    border-radius: 4px;
+                    margin-bottom: 20px;
+                }
+                .actions {
+                    margin-top: 20px;
+                }
+                .actions button {
+                    padding: 8px 16px;
+                    font-size: 16px;
+                    margin-right: 10px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>Trading Bot Control Panel</h1>
+                </div>
+                {% with messages = get_flashed_messages() %}
+                  {% if messages %}
+                    {% for message in messages %}
+                      <div class="flash">{{ message }}</div>
+                    {% endfor %}
+                  {% endif %}
+                {% endwith %}
+                <div class="status">
+                    <h2>Bot Status: {{ state['status'] }}</h2>
+                    <p>Latest Price: ${{ state['latest_price'] }}</p>
+                    <p>Account Balance: ${{ state['account_balance'] }}</p>
+                    {% if state['position'] %}
+                        <p>Current Position: {{ state['position']['qty'] }} units at entry price ${{ state['position']['entry_price'] }}</p>
+                        <p>Current P/L: ${{ state['pnl'] }}</p>
+                    {% else %}
+                        <p>No open positions.</p>
+                    {% endif %}
+                </div>
+                <div class="threshold-form">
+                    <h2>Configure Entry Threshold</h2>
+                    <form action="{{ url_for('update_threshold') }}" method="post">
+                        <label for="entry_threshold">Entry Threshold ($): </label>
+                        <input type="number" id="entry_threshold" name="entry_threshold" min="0" step="100" value="{{ config['ENTRY_THRESHOLD'] }}" required>
+                        <button type="submit">Update Threshold</button>
+                    </form>
+                </div>
+                <div class="actions">
+                    <h2>Actions</h2>
+                    <form action="{{ url_for('execute_trade') }}" method="post">
+                        <button type="submit">Execute Trade Now</button>
+                    </form>
+                </div>
+                <h2>Logs</h2>
+                <div class="logs" id="logContainer">
+                    {% for message in log_messages %}
+                        {% if 'ERROR' in message %}
+                            <span style="color: red;">{{ message }}</span><br>
+                        {% elif 'WARNING' in message %}
+                            <span style="color: orange;">{{ message }}</span><br>
+                        {% elif 'INFO' in message %}
+                            <span style="color: green;">{{ message }}</span><br>
+                        {% else %}
+                            {{ message }}<br>
+                        {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            <script>
+                // Auto-scroll to the bottom of the logs div
+                var logContainer = document.getElementById("logContainer");
+                logContainer.scrollTop = logContainer.scrollHeight;
+            </script>
+        </body>
+        </html>
+    ''', log_messages=log_messages, config=config, state=state)
+
+@app.route('/update_threshold', methods=['POST'])
+@auth.login_required
+def update_threshold():
+    new_threshold = request.form.get('entry_threshold')
+    if new_threshold:
+        try:
+            new_threshold = float(new_threshold)
+            # Update the config
+            config['ENTRY_THRESHOLD'] = new_threshold
+            # Here, you would send the updated config to the bot, e.g., via a shared database or message queue
+            flash(f"Entry threshold successfully updated to ${new_threshold:.2f}.")
+        except ValueError:
+            flash("Invalid entry threshold value.")
+    else:
+        flash("No entry threshold value provided.")
+    return redirect(url_for('index'))
+
+@app.route('/execute_trade', methods=['POST'])
+@auth.login_required
+def execute_trade():
+    # Send command to bot to execute trade immediately
+    # For now, just flash a message
+    flash("Trade execution triggered.")
+    # You would implement the actual command sending to the bot here
+    return redirect(url_for('index'))
+
+if __name__ == '__main__':
+    app.run(debug=False)
