@@ -1,11 +1,10 @@
-# app.py
-
 from flask import Flask, render_template_string, request, redirect, url_for, flash
 import logging
 import os
 from flask_httpauth import HTTPBasicAuth
 import redis
 import json
+import ssl
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'supersecretkey')  # For flashing messages
@@ -26,27 +25,26 @@ def verify_password(username, password):
     return None
 
 # Redis connection
-import ssl
-
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 
-if REDIS_URL.startswith('rediss://'):
-    # SSL/TLS connection to Heroku Redis
-    redis_client = redis.Redis.from_url(
-        REDIS_URL,
-        ssl=True,
-        ssl_cert_reqs=None  # Disables SSL certificate verification
-    )
-else:
-    # Non-SSL connection (local development)
-    redis_client = redis.Redis.from_url(REDIS_URL)
-
-# Test the Redis connection
 try:
+    if REDIS_URL.startswith('rediss://'):
+        # SSL/TLS connection to Heroku Redis
+        redis_client = redis.Redis.from_url(
+            REDIS_URL,
+            ssl=True,
+            ssl_cert_reqs=None  # Disables SSL certificate verification
+        )
+    else:
+        # Non-SSL connection (local development)
+        redis_client = redis.Redis.from_url(REDIS_URL)
+
+    # Test the Redis connection
     redis_client.ping()
     app.logger.info("Connected to Redis successfully.")
-except redis.ConnectionError as e:
+except Exception as e:
     app.logger.error(f"Redis connection error: {e}")
+    redis_client = None  # Set redis_client to None to prevent further errors
 
 # Shared configuration dictionary
 config = {
@@ -59,8 +57,16 @@ log_messages = []
 @app.route('/')
 @auth.login_required
 def index():
+    if redis_client is None:
+        return "Redis connection failed. Please try again later.", 500
+
     # Retrieve bot state from Redis
-    bot_state = redis_client.hgetall('bot_state')
+    try:
+        bot_state = redis_client.hgetall('bot_state')
+    except Exception as e:
+        app.logger.error(f"Error retrieving bot state: {e}")
+        bot_state = {}
+
     # Convert bytes to appropriate types
     state = {}
     for key, value in bot_state.items():
@@ -226,6 +232,10 @@ def index():
 @app.route('/update_threshold', methods=['POST'])
 @auth.login_required
 def update_threshold():
+    if redis_client is None:
+        flash("Redis connection failed. Cannot update threshold.")
+        return redirect(url_for('index'))
+
     new_threshold = request.form.get('entry_threshold')
     if new_threshold:
         try:
@@ -242,6 +252,10 @@ def update_threshold():
 @app.route('/execute_trade', methods=['POST'])
 @auth.login_required
 def execute_trade():
+    if redis_client is None:
+        flash("Redis connection failed. Cannot execute trade.")
+        return redirect(url_for('index'))
+
     # Publish command to Redis
     redis_client.publish('bot_commands', 'execute_trade')
     flash("Trade execution triggered.")

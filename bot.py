@@ -23,26 +23,16 @@ SECRET_KEY = os.environ.get('SECRET_KEY')
 # Initialize the trading client
 client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 
-# Redis connection
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+# Configure logging
+logger = logging.getLogger('bot')
+logger.setLevel(logging.INFO)
 
-if REDIS_URL.startswith('rediss://'):
-    # SSL/TLS connection to Heroku Redis
-    redis_client = redis.Redis.from_url(
-        REDIS_URL,
-        ssl=True,
-        ssl_cert_reqs=None  # Disables SSL certificate verification
-    )
-else:
-    # Non-SSL connection (local development)
-    redis_client = redis.Redis.from_url(REDIS_URL)
-
-# Test the Redis connection
-try:
-    redis_client.ping()
-    print("Connected to Redis successfully.")
-except redis.ConnectionError as e:
-    print(f"Redis connection error: {e}")
+# Create a console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 # Global variables
 latest_price = None
@@ -56,17 +46,6 @@ STOP_LOSS = -2             # Stop loss in percentage
 # Bot control flag
 bot_running = False
 
-# Configure logging
-logger = logging.getLogger('bot')
-logger.setLevel(logging.INFO)
-
-# Create a console handler
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
-
 # Shared configuration dictionary
 config = {
     'ENTRY_THRESHOLD': 60000  # Default value
@@ -74,6 +53,28 @@ config = {
 
 # To handle graceful shutdowns
 stop_event = asyncio.Event()
+
+# Redis connection
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+
+try:
+    if REDIS_URL.startswith('rediss://'):
+        # SSL/TLS connection to Heroku Redis
+        redis_client = redis.Redis.from_url(
+            REDIS_URL,
+            ssl=True,
+            ssl_cert_reqs=None  # Disables SSL certificate verification
+        )
+    else:
+        # Non-SSL connection (local development)
+        redis_client = redis.Redis.from_url(REDIS_URL)
+
+    # Test the Redis connection
+    redis_client.ping()
+    logger.info("Connected to Redis successfully.")
+except Exception as e:
+    logger.error(f"Redis connection error: {e}")
+    redis_client = None  # Set redis_client to None to prevent further errors
 
 async def place_order(symbol, qty, side):
     """
@@ -113,7 +114,7 @@ async def on_quote(data, config, config_lock):
     """
     Callback function to handle price updates from the WebSocket.
     """
-    global latest_price, position, bot_running
+    global latest_price, position, bot_running, redis_client
     if not bot_running:
         logger.info("Bot is stopped. Exiting on_quote.")
         return
@@ -122,18 +123,23 @@ async def on_quote(data, config, config_lock):
     logger.info(f"Received price update: {SYMBOL} at ${latest_price:.2f}")
 
     # Update Redis with latest price
-    redis_client.hset('bot_state', 'latest_price', latest_price)
+    if redis_client:
+        redis_client.hset('bot_state', 'latest_price', latest_price)
 
     try:
         # Read the ENTRY_THRESHOLD from Redis
-        entry_threshold = redis_client.hget('bot_config', 'ENTRY_THRESHOLD')
-        if entry_threshold is not None:
-            entry_threshold = float(entry_threshold)
+        if redis_client:
+            entry_threshold = redis_client.hget('bot_config', 'ENTRY_THRESHOLD')
+            if entry_threshold is not None:
+                entry_threshold = float(entry_threshold)
+            else:
+                entry_threshold = config.get('ENTRY_THRESHOLD', 60000)  # Default if not set
         else:
-            entry_threshold = config.get('ENTRY_THRESHOLD', 60000)  # Default if not set
+            entry_threshold = config.get('ENTRY_THRESHOLD', 60000)
 
         if position is None:
-            redis_client.hset('bot_state', 'status', 'Waiting to Enter Trade')
+            if redis_client:
+                redis_client.hset('bot_state', 'status', 'Waiting to Enter Trade')
             logger.info("No current position.")
             if latest_price <= entry_threshold:
                 logger.info(f"Price ${latest_price:.2f} <= entry threshold ${entry_threshold:.2f}. Evaluating buy opportunity.")
@@ -141,17 +147,20 @@ async def on_quote(data, config, config_lock):
             else:
                 logger.info("Price above entry threshold. Waiting.")
         else:
-            redis_client.hset('bot_state', 'status', 'In Position')
+            if redis_client:
+                redis_client.hset('bot_state', 'status', 'In Position')
             entry_price = position['entry_price']
             profit_percentage = ((latest_price - entry_price) / entry_price) * 100
             logger.info(f"Current profit: {profit_percentage:.2f}%")
 
             # Update PnL in Redis
             pnl = calculate_current_pnl()
-            redis_client.hset('bot_state', 'pnl', pnl)
+            if redis_client:
+                redis_client.hset('bot_state', 'pnl', pnl)
 
             # Update position in Redis
-            redis_client.hset('bot_state', 'position', json.dumps(position))
+            if redis_client:
+                redis_client.hset('bot_state', 'position', json.dumps(position))
 
             if profit_percentage >= PROFIT_TARGET:
                 logger.info(f"Profit target reached ({profit_percentage:.2f}%). Placing sell order.")
@@ -165,7 +174,7 @@ async def on_quote(data, config, config_lock):
         logger.error(f"Error in trading logic: {e}")
 
 async def enter_position():
-    global position, latest_price
+    global position, latest_price, redis_client
     try:
         account = await asyncio.to_thread(client.get_account)
         buying_power = float(account.buying_power) / 3
@@ -179,14 +188,15 @@ async def enter_position():
             }
             logger.info(f"Entered position: Bought {qty:.6f} {SYMBOL} at ${latest_price:.2f}")
             # Update position in Redis
-            redis_client.hset('bot_state', 'position', json.dumps(position))
+            if redis_client:
+                redis_client.hset('bot_state', 'position', json.dumps(position))
         else:
             logger.error("Failed to enter position.")
     except Exception as e:
         logger.error(f"Error entering position: {e}")
 
 async def exit_position(reason=''):
-    global position, latest_price
+    global position, latest_price, redis_client
     if position is None:
         logger.info("No position to exit.")
         return
@@ -197,8 +207,9 @@ async def exit_position(reason=''):
             logger.info(f"Exited position: Sold {qty:.6f} {SYMBOL} at ${latest_price:.2f}. Reason: {reason}")
             position = None
             # Remove position from Redis
-            redis_client.hdel('bot_state', 'position')
-            redis_client.hset('bot_state', 'status', 'Waiting to Enter Trade')
+            if redis_client:
+                redis_client.hdel('bot_state', 'position')
+                redis_client.hset('bot_state', 'status', 'Waiting to Enter Trade')
         else:
             logger.error("Failed to exit position.")
     except Exception as e:
@@ -238,7 +249,7 @@ async def update_position_state():
     """
     Initializes the position state based on current holdings.
     """
-    global position
+    global position, redis_client
     try:
         positions = await asyncio.to_thread(client.get_all_positions)
         for pos in positions:
@@ -249,26 +260,31 @@ async def update_position_state():
                 }
                 logger.info(f"Existing position detected: {position}")
                 # Update position in Redis
-                redis_client.hset('bot_state', 'position', json.dumps(position))
+                if redis_client:
+                    redis_client.hset('bot_state', 'position', json.dumps(position))
                 break
     except Exception as e:
         logger.error(f"Error updating position state: {e}")
 
 async def update_account_balance():
-    global bot_running
+    global bot_running, redis_client
     while bot_running:
         try:
             account = await asyncio.to_thread(client.get_account)
             cash = float(account.cash)
             # Update Redis
-            redis_client.hset('bot_state', 'account_balance', cash)
+            if redis_client:
+                redis_client.hset('bot_state', 'account_balance', cash)
             await asyncio.sleep(60)  # Update every 60 seconds
         except Exception as e:
             logger.error(f"Error updating account balance: {e}")
             await asyncio.sleep(60)
 
 async def listen_for_commands():
-    global bot_running
+    global bot_running, redis_client
+    if redis_client is None:
+        logger.error("Redis client is not available. Command listener will not start.")
+        return
     pubsub = redis_client.pubsub()
     pubsub.subscribe('bot_commands')
     while bot_running:
@@ -296,11 +312,17 @@ async def main(config, config_lock):
     await update_position_state()
 
     # Start the price stream, account updater, and command listener
-    await asyncio.gather(
+    tasks = [
         start_price_stream(config, config_lock),
         update_account_balance(),
-        listen_for_commands(),
-    )
+    ]
+
+    if redis_client:
+        tasks.append(listen_for_commands())
+    else:
+        logger.error("Redis client is not available. Skipping command listener.")
+
+    await asyncio.gather(*tasks)
 
 def stop_bot():
     global bot_running
