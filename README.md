@@ -28,3 +28,7 @@ Alpaca-Py: Python SDK for Alpaca's trading and data APIs.
 Gunicorn: Production-ready WSGI server.
 Heroku: Cloud platform for deployment.
 HTML/CSS: Front-end styling for the web interface.
+Prerequisites
+Python 3.8+ installed on your machine
+An Alpaca account with API keys (for paper trading)
+Heroku account (if deploying to Heroku)
