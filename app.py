@@ -4,6 +4,8 @@ from flask import Flask, render_template_string, request, redirect, url_for, fla
 import logging
 import os
 from flask_httpauth import HTTPBasicAuth
+import redis
+import json
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'supersecretkey')  # For flashing messages
@@ -23,6 +25,10 @@ def verify_password(username, password):
         return username
     return None
 
+# Redis connection
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+redis_client = redis.Redis.from_url(REDIS_URL)
+
 # Shared configuration dictionary
 config = {
     'ENTRY_THRESHOLD': 60000  # Default value
@@ -34,16 +40,26 @@ log_messages = []
 @app.route('/')
 @auth.login_required
 def index():
-    # Since the bot is running separately, we'll need to get the bot's state via a shared resource.
-    # For now, we'll display placeholder data.
+    # Retrieve bot state from Redis
+    bot_state = redis_client.hgetall('bot_state')
+    # Convert bytes to appropriate types
+    state = {}
+    for key, value in bot_state.items():
+        key = key.decode('utf-8')
+        if key == 'position':
+            state[key] = json.loads(value.decode('utf-8'))
+        else:
+            try:
+                state[key] = float(value)
+            except ValueError:
+                state[key] = value.decode('utf-8')
 
-    state = {
-        'status': 'Unknown',          # Placeholder status
-        'latest_price': 'N/A',        # Placeholder latest price
-        'account_balance': 'N/A',     # Placeholder account balance
-        'position': None,             # No position data
-        'pnl': 'N/A'                  # Placeholder P/L
-    }
+    # Ensure all expected keys are present
+    state.setdefault('status', 'Unknown')
+    state.setdefault('latest_price', 'N/A')
+    state.setdefault('account_balance', 'N/A')
+    state.setdefault('position', None)
+    state.setdefault('pnl', 'N/A')
 
     return render_template_string('''
         <!DOCTYPE html>
@@ -154,7 +170,7 @@ def index():
                     <h2>Configure Entry Threshold</h2>
                     <form action="{{ url_for('update_threshold') }}" method="post">
                         <label for="entry_threshold">Entry Threshold ($): </label>
-                        <input type="number" id="entry_threshold" name="entry_threshold" min="0" step="100" value="{{ config['ENTRY_THRESHOLD'] }}" required>
+                        <input type="number" id="entry_threshold" name="entry_threshold" min="0" step="100" value="{{ state.get('entry_threshold', config['ENTRY_THRESHOLD']) }}" required>
                         <button type="submit">Update Threshold</button>
                     </form>
                 </div>
@@ -195,9 +211,8 @@ def update_threshold():
     if new_threshold:
         try:
             new_threshold = float(new_threshold)
-            # Update the config
-            config['ENTRY_THRESHOLD'] = new_threshold
-            # Here, you would send the updated config to the bot, e.g., via a shared database or message queue
+            # Update the config in Redis
+            redis_client.hset('bot_config', 'ENTRY_THRESHOLD', new_threshold)
             flash(f"Entry threshold successfully updated to ${new_threshold:.2f}.")
         except ValueError:
             flash("Invalid entry threshold value.")
@@ -208,10 +223,9 @@ def update_threshold():
 @app.route('/execute_trade', methods=['POST'])
 @auth.login_required
 def execute_trade():
-    # Send command to bot to execute trade immediately
-    # For now, just flash a message
+    # Publish command to Redis
+    redis_client.publish('bot_commands', 'execute_trade')
     flash("Trade execution triggered.")
-    # You would implement the actual command sending to the bot here
     return redirect(url_for('index'))
 
 if __name__ == '__main__':
