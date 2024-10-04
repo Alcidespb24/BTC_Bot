@@ -54,7 +54,7 @@ def verify_password(username, password):
 # Global variables to control the bot's execution
 bot_thread = None
 bot_running = False
-config_lock = threading.Lock()  # To ensure thread-safe access to config
+config_lock = asyncio.Lock()  # Use asyncio.Lock for async operations
 
 @app.route('/')
 @auth.login_required
@@ -269,8 +269,7 @@ def update_threshold():
     if new_threshold:
         try:
             new_threshold = float(new_threshold)
-            with config_lock:
-                config['ENTRY_THRESHOLD'] = new_threshold
+            asyncio.run(update_config(new_threshold))
             bot_logger.info(f"Entry threshold updated to ${new_threshold:.2f} via web interface.")
             flash(f"Entry threshold successfully updated to ${new_threshold:.2f}.")
         except ValueError:
@@ -278,6 +277,11 @@ def update_threshold():
     else:
         flash("No entry threshold value provided.")
     return redirect(url_for('index'))
+
+async def update_config(new_threshold):
+    global config
+    async with config_lock:
+        config['ENTRY_THRESHOLD'] = new_threshold
 
 def run_bot():
     try:
