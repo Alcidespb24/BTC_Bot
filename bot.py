@@ -8,6 +8,8 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.live import CryptoDataStream
+from alpaca.trading.models import Order
+import signal
 
 # Access environment variables for API keys
 API_KEY = os.environ.get('API_KEY')
@@ -36,10 +38,11 @@ logger.propagate = False      # Prevent log messages from being passed to the ro
 # To handle graceful shutdowns
 stop_event = asyncio.Event()
 
+# Add imports
+from alpaca.trading.models import Order
+
+# Modify place_order function
 async def place_order(symbol, qty, side):
-    """
-    Places a market order and logs the order details.
-    """
     global latest_price
     try:
         order_details = MarketOrderRequest(
@@ -48,8 +51,8 @@ async def place_order(symbol, qty, side):
             side=side,
             time_in_force=TimeInForce.GTC
         )
-        # Run the blocking submit_order in a separate thread
-        order = await asyncio.to_thread(client.submit_order, order_details)
+        # Place the order asynchronously
+        order: Order = await asyncio.to_thread(client.submit_order, order_details)
         price = latest_price
         side_str = "Buy" if side == OrderSide.BUY else "Sell"
         logger.info(f"{side_str} order placed: {qty:.6f} {symbol} at ${price:.2f}")
@@ -57,6 +60,7 @@ async def place_order(symbol, qty, side):
     except Exception as e:
         logger.error(f"Error placing {side_str.lower()} order: {e}")
         return None
+
 
 async def on_quote(data, config, config_lock):
     """
