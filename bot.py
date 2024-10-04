@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from functools import partial
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -70,7 +71,7 @@ async def on_quote(data, config, config_lock):
     logger.info(f"Received price update: {SYMBOL} at ${latest_price:.2f}")
     try:
         # Access the dynamic ENTRY_THRESHOLD
-        with config_lock:
+        async with config_lock:
             entry_threshold = config.get('ENTRY_THRESHOLD', 60000)  # Default if not set
 
         if position is None:
@@ -117,7 +118,9 @@ async def start_price_stream(config, config_lock):
     Starts the WebSocket stream to receive real-time price updates.
     """
     crypto_stream = CryptoDataStream(API_KEY, SECRET_KEY)
-    crypto_stream.subscribe_quotes(on_quote, SYMBOL, config=config, config_lock=config_lock)
+    # Use functools.partial to pass config and config_lock to on_quote
+    callback = partial(on_quote, config=config, config_lock=config_lock)
+    crypto_stream.subscribe_quotes(callback, SYMBOL)
     try:
         logger.info("Starting price stream...")
         await crypto_stream._run_forever()
@@ -164,7 +167,12 @@ def stop_bot():
 if __name__ == "__main__":
     # This block allows the bot to be run independently if needed
     import sys
-    import json
+
+    # Define default config and config_lock for standalone execution
+    config = {
+        'ENTRY_THRESHOLD': 60000  # Default value
+    }
+    config_lock = asyncio.Lock()
 
     if len(sys.argv) > 1 and sys.argv[1] == 'run':
         # Example usage: python bot.py run
