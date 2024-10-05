@@ -59,16 +59,10 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 
 try:
     if REDIS_URL.startswith('rediss://'):
-        # Create SSL context
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE  # Disables SSL certificate verification
-
         # SSL/TLS connection to Heroku Redis
         redis_client = redis.Redis.from_url(
             REDIS_URL,
-            ssl=True,
-            ssl_context=ssl_context
+            ssl_cert_reqs=None  # Disables SSL certificate verification
         )
     else:
         # Non-SSL connection (local development)
@@ -225,30 +219,12 @@ async def start_price_stream(config, config_lock):
     bot_running = True  # Ensure bot_running is set to True
     crypto_stream = CryptoDataStream(API_KEY, SECRET_KEY)
     callback = partial(on_quote, config=config, config_lock=config_lock)
-    await crypto_stream.subscribe_quotes(callback, SYMBOL)
 
-    backoff = 1  # Start with a 1-second delay
-    max_backoff = 60  # Maximum delay of 60 seconds
-    max_retries = 10  # Maximum number of reconnection attempts
-    retries = 0
+    # Subscribe to quotes
+    crypto_stream.subscribe_quotes(callback, SYMBOL)
 
-    while bot_running and retries < max_retries:
-        try:
-            logger.info("Starting price stream...")
-            await crypto_stream._connect()
-            await crypto_stream._handle_messages()
-        except Exception as e:
-            logger.error(f"Error in price stream: {e}. Backing off for {backoff} seconds.")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_backoff)
-            retries += 1
-
-    if retries >= max_retries:
-        logger.error("Maximum reconnection attempts reached. Bot will stop.")
-        bot_running = False
-
-    await crypto_stream.close()
-    logger.info("Price stream closed.")
+    # Start the data stream
+    await crypto_stream._run_forever()
 
 async def update_position_state():
     """

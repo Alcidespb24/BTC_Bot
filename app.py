@@ -7,12 +7,13 @@ from flask_httpauth import HTTPBasicAuth
 import redis
 import json
 import ssl
+import traceback
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'supersecretkey')  # For flashing messages
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 auth = HTTPBasicAuth()
 
@@ -31,16 +32,10 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 
 try:
     if REDIS_URL.startswith('rediss://'):
-        # Create SSL context
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE  # Disables SSL certificate verification
-
         # SSL/TLS connection to Heroku Redis
         redis_client = redis.Redis.from_url(
             REDIS_URL,
-            ssl=True,
-            ssl_context=ssl_context
+            ssl_cert_reqs=None  # Disables SSL certificate verification
         )
     else:
         # Non-SSL connection (local development)
@@ -64,177 +59,183 @@ log_messages = []
 @app.route('/')
 @auth.login_required
 def index():
-    if redis_client is None:
-        return "Redis connection failed. Please try again later.", 500
-
-    # Retrieve bot state from Redis
     try:
-        bot_state = redis_client.hgetall('bot_state')
-    except Exception as e:
-        app.logger.error(f"Error retrieving bot state: {e}")
-        bot_state = {}
+        if redis_client is None:
+            return "Redis connection failed. Please try again later.", 500
 
-    # Convert bytes to appropriate types
-    state = {}
-    for key, value in bot_state.items():
-        key = key.decode('utf-8')
-        if key == 'position':
-            state[key] = json.loads(value.decode('utf-8'))
-        else:
-            try:
-                state[key] = float(value)
-            except ValueError:
-                state[key] = value.decode('utf-8')
+        # Retrieve bot state from Redis
+        try:
+            bot_state = redis_client.hgetall('bot_state')
+        except Exception as e:
+            app.logger.error(f"Error retrieving bot state: {e}")
+            bot_state = {}
 
-    # Ensure all expected keys are present
-    state.setdefault('status', 'Unknown')
-    state.setdefault('latest_price', 'N/A')
-    state.setdefault('account_balance', 'N/A')
-    state.setdefault('position', None)
-    state.setdefault('pnl', 'N/A')
+        # Convert bytes to appropriate types
+        state = {}
+        for key, value in bot_state.items():
+            key = key.decode('utf-8')
+            if key == 'position':
+                state[key] = json.loads(value.decode('utf-8'))
+            else:
+                try:
+                    state[key] = float(value)
+                except ValueError:
+                    state[key] = value.decode('utf-8')
 
-    return render_template_string('''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Trading Bot Control Panel</title>
-            <meta http-equiv="refresh" content="5"> <!-- Refresh every 5 seconds -->
-            <style>
-                body { 
-                    font-family: Arial, sans-serif; 
-                    margin: 20px; 
-                    background-color: #f0f2f5;
-                }
-                h1 { 
-                    color: #333; 
-                }
-                .logs { 
-                    white-space: pre-wrap; 
-                    border: 1px solid #ccc; 
-                    padding: 10px; 
-                    height: 400px; 
-                    overflow-y: scroll; 
-                    background-color: #fff;
-                    border-radius: 5px;
-                    box-shadow: 0 0 10px rgba(0,0,0,0.1);
-                }
-                .container {
-                    max-width: 900px;
-                    margin: auto;
-                }
-                .header {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                }
-                .header div {
-                    display: flex;
-                    align-items: center;
-                }
-                .header h1 {
-                    margin: 0;
-                }
-                .status {
-                    font-size: 18px;
-                    color: #28a745;
-                    font-weight: bold;
-                }
-                .status.stopped {
-                    color: #dc3545;
-                }
-                .threshold-form {
-                    margin-top: 20px;
-                }
-                .threshold-form input {
-                    padding: 8px;
-                    font-size: 16px;
-                    border: 1px solid #ccc;
-                    border-radius: 4px;
-                    width: 150px;
-                }
-                .threshold-form button {
-                    padding: 8px 16px;
-                    font-size: 16px;
-                    margin-left: 10px;
-                }
-                .flash {
-                    padding: 10px;
-                    background-color: #d4edda;
-                    color: #155724;
-                    border: 1px solid #c3e6cb;
-                    border-radius: 4px;
-                    margin-bottom: 20px;
-                }
-                .actions {
-                    margin-top: 20px;
-                }
-                .actions button {
-                    padding: 8px 16px;
-                    font-size: 16px;
-                    margin-right: 10px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>Trading Bot Control Panel</h1>
-                </div>
-                {% with messages = get_flashed_messages() %}
-                  {% if messages %}
-                    {% for message in messages %}
-                      <div class="flash">{{ message }}</div>
-                    {% endfor %}
-                  {% endif %}
-                {% endwith %}
-                <div class="status">
-                    <h2>Bot Status: {{ state['status'] }}</h2>
-                    <p>Latest Price: ${{ state['latest_price'] }}</p>
-                    <p>Account Balance: ${{ state['account_balance'] }}</p>
-                    {% if state['position'] %}
-                        <p>Current Position: {{ state['position']['qty'] }} units at entry price ${{ state['position']['entry_price'] }}</p>
-                        <p>Current P/L: ${{ state['pnl'] }}</p>
-                    {% else %}
-                        <p>No open positions.</p>
-                    {% endif %}
-                </div>
-                <div class="threshold-form">
-                    <h2>Configure Entry Threshold</h2>
-                    <form action="{{ url_for('update_threshold') }}" method="post">
-                        <label for="entry_threshold">Entry Threshold ($): </label>
-                        <input type="number" id="entry_threshold" name="entry_threshold" min="0" step="100" value="{{ state.get('entry_threshold', config['ENTRY_THRESHOLD']) }}" required>
-                        <button type="submit">Update Threshold</button>
-                    </form>
-                </div>
-                <div class="actions">
-                    <h2>Actions</h2>
-                    <form action="{{ url_for('execute_trade') }}" method="post">
-                        <button type="submit">Execute Trade Now</button>
-                    </form>
-                </div>
-                <h2>Logs</h2>
-                <div class="logs" id="logContainer">
-                    {% for message in log_messages %}
-                        {% if 'ERROR' in message %}
-                            <span style="color: red;">{{ message }}</span><br>
-                        {% elif 'WARNING' in message %}
-                            <span style="color: orange;">{{ message }}</span><br>
-                        {% elif 'INFO' in message %}
-                            <span style="color: green;">{{ message }}</span><br>
+        # Ensure all expected keys are present
+        state.setdefault('status', 'Unknown')
+        state.setdefault('latest_price', 'N/A')
+        state.setdefault('account_balance', 'N/A')
+        state.setdefault('position', None)
+        state.setdefault('pnl', 'N/A')
+
+        return render_template_string('''
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Trading Bot Control Panel</title>
+                <meta http-equiv="refresh" content="5"> <!-- Refresh every 5 seconds -->
+                <style>
+                    body { 
+                        font-family: Arial, sans-serif; 
+                        margin: 20px; 
+                        background-color: #f0f2f5;
+                    }
+                    h1 { 
+                        color: #333; 
+                    }
+                    .logs { 
+                        white-space: pre-wrap; 
+                        border: 1px solid #ccc; 
+                        padding: 10px; 
+                        height: 400px; 
+                        overflow-y: scroll; 
+                        background-color: #fff;
+                        border-radius: 5px;
+                        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                    }
+                    .container {
+                        max-width: 900px;
+                        margin: auto;
+                    }
+                    .header {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    }
+                    .header div {
+                        display: flex;
+                        align-items: center;
+                    }
+                    .header h1 {
+                        margin: 0;
+                    }
+                    .status {
+                        font-size: 18px;
+                        color: #28a745;
+                        font-weight: bold;
+                    }
+                    .status.stopped {
+                        color: #dc3545;
+                    }
+                    .threshold-form {
+                        margin-top: 20px;
+                    }
+                    .threshold-form input {
+                        padding: 8px;
+                        font-size: 16px;
+                        border: 1px solid #ccc;
+                        border-radius: 4px;
+                        width: 150px;
+                    }
+                    .threshold-form button {
+                        padding: 8px 16px;
+                        font-size: 16px;
+                        margin-left: 10px;
+                    }
+                    .flash {
+                        padding: 10px;
+                        background-color: #d4edda;
+                        color: #155724;
+                        border: 1px solid #c3e6cb;
+                        border-radius: 4px;
+                        margin-bottom: 20px;
+                    }
+                    .actions {
+                        margin-top: 20px;
+                    }
+                    .actions button {
+                        padding: 8px 16px;
+                        font-size: 16px;
+                        margin-right: 10px;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Trading Bot Control Panel</h1>
+                    </div>
+                    {% with messages = get_flashed_messages() %}
+                      {% if messages %}
+                        {% for message in messages %}
+                          <div class="flash">{{ message }}</div>
+                        {% endfor %}
+                      {% endif %}
+                    {% endwith %}
+                    <div class="status">
+                        <h2>Bot Status: {{ state['status'] }}</h2>
+                        <p>Latest Price: ${{ state['latest_price'] }}</p>
+                        <p>Account Balance: ${{ state['account_balance'] }}</p>
+                        {% if state['position'] %}
+                            <p>Current Position: {{ state['position']['qty'] }} units at entry price ${{ state['position']['entry_price'] }}</p>
+                            <p>Current P/L: ${{ state['pnl'] }}</p>
                         {% else %}
-                            {{ message }}<br>
+                            <p>No open positions.</p>
                         {% endif %}
-                    {% endfor %}
+                    </div>
+                    <div class="threshold-form">
+                        <h2>Configure Entry Threshold</h2>
+                        <form action="{{ url_for('update_threshold') }}" method="post">
+                            <label for="entry_threshold">Entry Threshold ($): </label>
+                            <input type="number" id="entry_threshold" name="entry_threshold" min="0" step="100" value="{{ state.get('entry_threshold', config['ENTRY_THRESHOLD']) }}" required>
+                            <button type="submit">Update Threshold</button>
+                        </form>
+                    </div>
+                    <div class="actions">
+                        <h2>Actions</h2>
+                        <form action="{{ url_for('execute_trade') }}" method="post">
+                            <button type="submit">Execute Trade Now</button>
+                        </form>
+                    </div>
+                    <h2>Logs</h2>
+                    <div class="logs" id="logContainer">
+                        {% for message in log_messages %}
+                            {% if 'ERROR' in message %}
+                                <span style="color: red;">{{ message }}</span><br>
+                            {% elif 'WARNING' in message %}
+                                <span style="color: orange;">{{ message }}</span><br>
+                            {% elif 'INFO' in message %}
+                                <span style="color: green;">{{ message }}</span><br>
+                            {% else %}
+                                {{ message }}<br>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
                 </div>
-            </div>
-            <script>
-                // Auto-scroll to the bottom of the logs div
-                var logContainer = document.getElementById("logContainer");
-                logContainer.scrollTop = logContainer.scrollHeight;
-            </script>
-        </body>
-        </html>
-    ''', log_messages=log_messages, config=config, state=state)
+                <script>
+                    // Auto-scroll to the bottom of the logs div
+                    var logContainer = document.getElementById("logContainer");
+                    logContainer.scrollTop = logContainer.scrollHeight;
+                </script>
+            </body>
+            </html>
+        ''', log_messages=log_messages, config=config, state=state)
+    except Exception as e:
+        app.logger.error(f"An error occurred: {e}")
+        traceback_str = ''.join(traceback.format_exception(None, e, e.__traceback__))
+        app.logger.error(traceback_str)
+        return "An internal error occurred.", 500
 
 @app.route('/update_threshold', methods=['POST'])
 @auth.login_required
@@ -267,6 +268,15 @@ def execute_trade():
     redis_client.publish('bot_commands', 'execute_trade')
     flash("Trade execution triggered.")
     return redirect(url_for('index'))
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Log the error with stack trace
+    app.logger.error(f"An error occurred: {e}")
+    traceback_str = ''.join(traceback.format_exception(None, e, e.__traceback__))
+    app.logger.error(traceback_str)
+    # Return a generic response or a custom error page
+    return "An internal error occurred.", 500
 
 if __name__ == '__main__':
     app.run(debug=False)
