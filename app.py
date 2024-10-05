@@ -43,9 +43,9 @@ try:
 
     # Test the Redis connection
     redis_client.ping()
-    app.logger.info("Connected to Redis successfully.")
+    print("Connected to Redis successfully.")
 except Exception as e:
-    app.logger.error(f"Redis connection error: {e}")
+    print(f"Redis connection error: {e}")
     redis_client = None  # Set redis_client to None to prevent further errors
 
 # Shared configuration dictionary
