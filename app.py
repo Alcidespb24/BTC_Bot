@@ -1,3 +1,5 @@
+# app.py
+
 from flask import Flask, render_template_string, request, redirect, url_for, flash
 import logging
 import os
@@ -26,7 +28,6 @@ def verify_password(username, password):
 
 # Redis connection
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
-print(f"Redis URL: {REDIS_URL}")
 
 try:
     if REDIS_URL.startswith('rediss://'):
@@ -34,7 +35,7 @@ try:
         redis_client = redis.Redis.from_url(
             REDIS_URL,
             ssl=True,
-            ssl_cert_reqs=None  # Disables SSL certificate verification
+            ssl_cert_reqs=ssl.CERT_NONE  # Disables SSL certificate verification
         )
     else:
         # Non-SSL connection (local development)
