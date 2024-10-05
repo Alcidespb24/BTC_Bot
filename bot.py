@@ -59,11 +59,16 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 
 try:
     if REDIS_URL.startswith('rediss://'):
+        # Create SSL context
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE  # Disables SSL certificate verification
+
         # SSL/TLS connection to Heroku Redis
         redis_client = redis.Redis.from_url(
             REDIS_URL,
             ssl=True,
-            ssl_cert_reqs=ssl.CERT_NONE  # Disables SSL certificate verification
+            ssl_context=ssl_context
         )
     else:
         # Non-SSL connection (local development)
@@ -71,9 +76,9 @@ try:
 
     # Test the Redis connection
     redis_client.ping()
-    print("Connected to Redis successfully.")
+    logger.info("Connected to Redis successfully.")
 except Exception as e:
-    print(f"Redis connection error: {e}")
+    logger.error(f"Redis connection error: {e}")
     redis_client = None  # Set redis_client to None to prevent further errors
 
 async def place_order(symbol, qty, side):
